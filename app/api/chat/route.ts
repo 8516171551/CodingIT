@@ -1,11 +1,11 @@
 import { handleAPIError, createRateLimitResponse } from '@/lib/api-errors'
 import { Duration } from '@/lib/duration'
-import { getModelClient, LLMModel, LLMModelConfig } from '@/lib/models'
+import { getModelString, LLMModel, LLMModelConfig } from '@/lib/models'
 import { toPrompt } from '@/lib/prompt'
 import ratelimit from '@/lib/ratelimit'
 import { fragmentSchema as schema } from '@/lib/schema'
 import { Templates } from '@/lib/templates'
-import { streamObject, LanguageModel, CoreMessage } from 'ai'
+import { streamObject, CoreMessage } from 'ai'
 
 export const maxDuration = 300
 
@@ -33,39 +33,39 @@ export async function POST(req: Request) {
     config: LLMModelConfig
   } = await req.json()
 
-  const limit = !config.apiKey
-    ? await ratelimit(
-        req.headers.get('x-forwarded-for'),
-        rateLimitMaxRequests,
-        ratelimitWindow,
-      )
-    : false
+  const limit = await ratelimit(
+    req.headers.get('x-forwarded-for'),
+    rateLimitMaxRequests,
+    ratelimitWindow,
+  )
 
   if (limit) {
     return createRateLimitResponse(limit)
   }
 
-  console.log('userID', userID)
-  console.log('teamID', teamID)
-  // console.log('template', template)
-  console.log('model', model)
-  // console.log('config', config)
+  console.log('[v0] userID', userID)
+  console.log('[v0] teamID', teamID)
+  console.log('[v0] model', model)
 
-  const { model: modelNameString, apiKey: modelApiKey, ...modelParams } = config
-  const modelClient = getModelClient(model, config)
+  // Use Vercel AI Gateway (zero-config) - just pass model string
+  const modelString = getModelString(model)
+  const { temperature, maxTokens, ...otherParams } = config
 
   try {
     const stream = await streamObject({
-      model: modelClient as LanguageModel,
+      model: modelString, // AI Gateway handles this automatically
       schema,
       system: toPrompt(template),
       messages,
       maxRetries: 0, // do not retry on errors
-      ...modelParams,
+      temperature,
+      maxTokens,
+      ...otherParams,
     })
 
     return stream.toTextStreamResponse()
   } catch (error: any) {
-    return handleAPIError(error, { hasOwnApiKey: !!config.apiKey })
+    console.error('[v0] Chat API error:', error)
+    return handleAPIError(error, { hasOwnApiKey: false })
   }
 }
