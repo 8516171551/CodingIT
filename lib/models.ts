@@ -1,11 +1,5 @@
-import { createAnthropic } from '@ai-sdk/anthropic'
-import { createFireworks } from '@ai-sdk/fireworks'
-import { createGoogleGenerativeAI } from '@ai-sdk/google'
-import { createVertex } from '@ai-sdk/google-vertex'
-import { createMistral } from '@ai-sdk/mistral'
-import { createOpenAI } from '@ai-sdk/openai'
-import { createOllama } from 'ollama-ai-provider'
-import { createOpenRouter } from '@openrouter/ai-sdk-provider'
+// Simplified AI models using Vercel AI Gateway (zero-config)
+// All models work through AI Gateway without needing API keys
 
 export type LLMModel = {
   id: string
@@ -16,9 +10,6 @@ export type LLMModel = {
 }
 
 export type LLMModelConfig = {
-  model?: string
-  apiKey?: string
-  baseURL?: string
   temperature?: number
   topP?: number
   topK?: number
@@ -27,86 +18,36 @@ export type LLMModelConfig = {
   maxTokens?: number
 }
 
-export function getModelClient(model: LLMModel, config: LLMModelConfig) {
-  const { id: modelNameString, providerId } = model
-  const { apiKey, baseURL } = config
+// Available models through Vercel AI Gateway
+export const AVAILABLE_MODELS: LLMModel[] = [
+  // OpenAI Models (zero-config via AI Gateway)
+  { id: 'gpt-4o', name: 'GPT-4o', provider: 'OpenAI', providerId: 'openai' },
+  { id: 'gpt-4o-mini', name: 'GPT-4o Mini', provider: 'OpenAI', providerId: 'openai' },
+  { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', provider: 'OpenAI', providerId: 'openai' },
+  { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo', provider: 'OpenAI', providerId: 'openai' },
+  
+  // Anthropic Models (zero-config via AI Gateway)
+  { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', provider: 'Anthropic', providerId: 'anthropic' },
+  { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', provider: 'Anthropic', providerId: 'anthropic' },
+  { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku', provider: 'Anthropic', providerId: 'anthropic' },
+  
+  // Google Models (zero-config via AI Gateway)
+  { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash', provider: 'Google', providerId: 'google' },
+  { id: 'gemini-1.5-pro-latest', name: 'Gemini 1.5 Pro', provider: 'Google', providerId: 'google' },
+  { id: 'gemini-1.5-flash-latest', name: 'Gemini 1.5 Flash', provider: 'Google', providerId: 'google' },
+]
 
-  const providerConfigs = {
-    anthropic: () => createAnthropic({ apiKey, baseURL })(modelNameString),
-    openai: () => createOpenAI({ apiKey, baseURL })(modelNameString),
-    google: () =>
-      createGoogleGenerativeAI({ apiKey, baseURL })(modelNameString),
-    mistral: () => createMistral({ apiKey, baseURL })(modelNameString),
-    groq: () =>
-      createOpenAI({
-        apiKey: apiKey || process.env.GROQ_API_KEY,
-        baseURL: baseURL || 'https://api.groq.com/openai/v1',
-      })(modelNameString),
-    togetherai: () =>
-      createOpenAI({
-        apiKey: apiKey || process.env.TOGETHER_API_KEY,
-        baseURL: baseURL || 'https://api.together.xyz/v1',
-      })(modelNameString),
-    ollama: () => createOllama({ baseURL })(modelNameString),
-    fireworks: () =>
-      createFireworks({
-        apiKey: apiKey || process.env.FIREWORKS_API_KEY,
-        baseURL: baseURL || 'https://api.fireworks.ai/inference/v1',
-      })(modelNameString),
-    vertex: () => {
-      const vertexCredentials = process.env.GOOGLE_VERTEX_CREDENTIALS;
-      
-      // Handle both API key and JSON credentials
-      if (!vertexCredentials) {
-        // Fallback to Google AI SDK if no Vertex credentials
-        return createGoogleGenerativeAI({ 
-          apiKey: apiKey || process.env.GOOGLE_AI_API_KEY 
-        })(modelNameString);
-      }
-      
-      // Try to parse as JSON first (service account credentials)
-      try {
-        const credentials = JSON.parse(vertexCredentials);
-        return createVertex({
-          googleAuthOptions: { credentials },
-        })(modelNameString);
-      } catch {
-        // If not JSON, treat as API key and use Google AI SDK instead
-        return createGoogleGenerativeAI({ 
-          apiKey: vertexCredentials || apiKey || process.env.GOOGLE_AI_API_KEY 
-        })(modelNameString);
-      }
-    },
-    xai: () =>
-      createOpenAI({
-        apiKey: apiKey || process.env.XAI_API_KEY,
-        baseURL: baseURL || 'https://api.x.ai/v1',
-      })(modelNameString),
-    deepseek: () =>
-      createOpenAI({
-        apiKey: apiKey || process.env.DEEPSEEK_API_KEY,
-        baseURL: baseURL || 'https://api.deepseek.com/v1',
-      })(modelNameString),
-    openrouter: () =>
-      createOpenRouter({
-        apiKey: apiKey || process.env.OPENROUTER_API_KEY,
-        baseURL: baseURL || 'https://openrouter.ai/api/v1',
-      })(modelNameString),
-  }
-
-  const createClient =
-    providerConfigs[providerId as keyof typeof providerConfigs]
-
-  if (!createClient) {
-    throw new Error(`Unsupported provider: ${providerId}`)
-  }
-
-  return createClient()
+// Get model string for AI SDK (provider/model-id format for AI Gateway)
+export function getModelString(model: LLMModel): string {
+  return `${model.providerId}/${model.id}`
 }
 
-export function getDefaultModelParams(model: LLMModel) {
-  // Return default parameters for the model
-  // This can be customized per provider/model if needed
+// Get default model
+export function getDefaultModel(): LLMModel {
+  return AVAILABLE_MODELS[0] // GPT-4o as default
+}
+
+export function getDefaultModelParams(model: LLMModel): LLMModelConfig {
   return {
     temperature: 0.7,
     maxTokens: 4096,

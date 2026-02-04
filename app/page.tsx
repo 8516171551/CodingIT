@@ -5,13 +5,12 @@ import { AuthDialog } from '@/components/auth-dialog';
 import { Chat } from '@/components/chat';
 import { PromptInputBox } from '@/components/ui/ai-prompt-box';
 import { NavBar } from '@/components/navbar';
-import { useAuth } from '@/lib/auth';
+import { useAuth, signOut } from '@/lib/auth-client';
 import dynamic from 'next/dynamic';
 import { Project, createProject, saveMessage, getProjectMessages, generateProjectTitle, getProject } from '@/lib/database';
 import { Message, toAISDKMessages, toMessageImage } from '@/lib/messages';
-import { LLMModelConfig } from '@/lib/models';
+import { LLMModelConfig, AVAILABLE_MODELS } from '@/lib/models';
 import { FragmentSchema, fragmentSchema as schema } from '@/lib/schema';
-import { createSupabaseBrowserClient } from '@/lib/supabase-browser';
 import templates, { TemplateId } from '@/lib/templates';
 import { ExecutionResult } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -22,8 +21,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { useLocalStorage } from 'usehooks-ts';
 import { useUserTeam } from '@/lib/user-team-provider';
 import { HeroPillSecond } from '@/components/announcement';
-import { SupabaseClient } from '@supabase/supabase-js';
-import models from '@/lib/models.json';
 
 const PricingModal = dynamic(() => import('@/components/pricing').then(mod => ({ default: mod.PricingModal })), {
   ssr: false,
@@ -38,12 +35,11 @@ const Preview = dynamic(() => import('@/components/preview').then(mod => ({ defa
 });
 
 export default function Home() {
-  const supabase = createSupabaseBrowserClient()
   const [selectedTemplate, setSelectedTemplate] = useState<'auto' | TemplateId>('auto')
   const [languageModel, setLanguageModel] = useLocalStorage<LLMModelConfig>(
     'languageModel',
     {
-      model: 'claude-3-5-sonnet-latest',
+      model: 'gpt-4o',
     },
   )
   const [useMorphApply, setUseMorphApply] = useLocalStorage(
@@ -81,26 +77,20 @@ export default function Home() {
   const [currentProject, setCurrentProject] = useState<Project | null>(null)
   const [isLoadingProject, setIsLoadingProject] = useState(false)
 
-  const { session } = useAuth(setAuthDialogCallback, setAuthViewCallback)
+  const { session, refreshSession } = useAuth(setAuthDialogCallback, setAuthViewCallback)
   const { userTeam } = useUserTeam()
 
   const handleChatSelected = async (chatId: string) => {
-    const project = await getProject(supabase, chatId);
+    if (!session?.user?.id) return
+    const project = await getProject(chatId, session.user.id);
     if (project) {
       setCurrentProject(project);
     }
   };
 
-  const filteredModels = models.models.filter((model: any) => {
-    if (process.env.NEXT_PUBLIC_HIDE_LOCAL_MODELS) {
-      return model.providerId !== 'ollama'
-    }
-    return true
-  })
-
-  const currentModel = filteredModels.find(
+  const currentModel = AVAILABLE_MODELS.find(
     (model: any) => model.id === languageModel.model,
-  );
+  ) || AVAILABLE_MODELS[0];
 
   // Determine which API to use based on morph toggle and existing fragment
   const shouldUseMorph = useMorphApply && fragment && fragment.code && fragment.file_path
@@ -204,28 +194,27 @@ export default function Home() {
       }
 
       setIsLoadingProject(true)
-      const projectMessages = await getProjectMessages(supabase, currentProject.id)
+      const projectMessages = await getProjectMessages(currentProject.id)
       setMessages(projectMessages)
       setIsLoadingProject(false)
     }
 
     loadProjectMessages()
-  }, [currentProject, supabase])
+  }, [currentProject])
 
   useEffect(() => {
     async function saveMessagesToDb() {
       if (!currentProject || !session || messages.length === 0) return
 
       const lastMessage = messages[messages.length - 1]
-      const sequenceNumber = messages.length - 1
 
-      await saveMessage(supabase, currentProject.id, lastMessage, sequenceNumber)
+      await saveMessage(currentProject.id, lastMessage)
     }
 
     if (messages.length > 0 && currentProject && session) {
       saveMessagesToDb()
     }
-  }, [messages, currentProject, session, supabase])
+  }, [messages, currentProject, session])
 
   useEffect(() => {
     if (object) {
@@ -332,14 +321,18 @@ export default function Home() {
       ...(shouldUseMorph && fragment ? { currentFragment: fragment } : {}),
     })
 
-    if (!currentProject) {
+    if (!currentProject && session?.user?.id) {
       try {
         const title = await generateProjectTitle(currentInput)
-        if (supabase) {
-          const newProject = await createProject(supabase, title, selectedTemplate === 'auto' ? undefined : selectedTemplate)
-          if (newProject) {
-            setCurrentProject(newProject)
-          }
+        const newProject = await createProject(
+          session.user.id,
+          title,
+          undefined,
+          undefined,
+          selectedTemplate === 'auto' ? undefined : selectedTemplate
+        )
+        if (newProject) {
+          setCurrentProject(newProject)
         }
       } catch (error) {
         console.error('Error creating project:', error)
@@ -375,13 +368,9 @@ export default function Home() {
     })
   }
 
-
-  function logout() {
-    if (supabase) {
-      supabase.auth.signOut()
-    } else {
-      console.warn('Supabase is not initialized')
-    }
+  async function logout() {
+    await signOut()
+    await refreshSession()
   }
 
   function handleLanguageModelChange(e: LLMModelConfig) {
@@ -539,14 +528,12 @@ export default function Home() {
 
   return (
     <main className="flex min-h-screen max-h-screen">
-      {supabase && (
-        <AuthDialog
-          open={isAuthDialogOpen}
-          setOpen={setAuthDialog}
-          view={authView}
-          supabase={supabase as unknown as SupabaseClient<any, "public", "public">}
-        />
-      )}
+      <AuthDialog
+        open={isAuthDialogOpen}
+        setOpen={setAuthDialog}
+        view={authView}
+        onAuthSuccess={refreshSession}
+      />
 
       <PricingModal
         isOpen={isPricingModalOpen}

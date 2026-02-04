@@ -1,91 +1,38 @@
-import { SupabaseClient } from '@supabase/supabase-js'
-import { createSupabaseBrowserClient } from './supabase-browser'
+import { neon } from '@neondatabase/serverless'
 import { Message } from './messages'
 import { clearSettingsCache } from './user-settings'
 import { getFromCache, setInCache, invalidateCache } from './caching'
 
-// The supabase client will be passed as an argument to functions.
-// A browser client is created here for convenience on the client-side.
-const browserSupabase = createSupabaseBrowserClient()
+const sql = neon(process.env.DATABASE_URL!)
 
 export interface Project {
   id: string
   user_id: string
-  team_id?: string
-  title: string
-  description?: string
-  template_id?: string
-  status: 'active' | 'archived' | 'deleted'
-  is_public: boolean
-  metadata?: Record<string, any>
+  name: string
+  description: string | null
+  language: string | null
+  framework: string | null
   created_at: string
   updated_at: string
-  deleted_at?: string
 }
 
 export interface DbMessage {
   id: string
   project_id: string
   role: 'user' | 'assistant'
-  content: Message['content']
-  object_data?: any
-  result_data?: any
-  sequence_number: number
+  content: string
+  model: string | null
   created_at: string
 }
 
-// Global flag to prevent excessive retries
-let tablesChecked = false
-let tablesExist = false
-
-// Check if tables exist once, then cache result
-async function ensureTablesExist(supabase: SupabaseClient<any, "public", any>): Promise<boolean> {
-  if (tablesChecked) return tablesExist;
-
-  if (!supabase) {
-    tablesChecked = true
-    tablesExist = false
-    return false
-  }
-
-  try {
-    // Quick check for critical tables
-    const { error } = await supabase.from('projects').select('id').limit(1)
-
-    tablesChecked = true
-    tablesExist = !error || error.code !== 'PGRST106'
-    
-    if (!tablesExist) {
-      console.warn('Database tables do not exist. Please run the migration.')
-    }
-    
-    return tablesExist
-  } catch (error) {
-    console.error('Table check failed:', error)
-    tablesChecked = true
-    tablesExist = false
-    return false
-  }
-}
-
-// Wrapper to prevent API calls when tables don't exist
-async function safeApiCall<T>(
-  supabase: SupabaseClient<any, "public", any>,
-  operation: () => Promise<T>,
-  fallback: T,
-  operationName: string
-): Promise<T> {
-  if (!(await ensureTablesExist(supabase))) {
-    console.warn(`Skipping ${operationName} - tables do not exist`)
-    return fallback
-  }
-  
-  try {
-    return await operation()
-  } catch (error) {
-    console.error(`${operationName} failed:`, error)
-    return fallback
-  }
+export interface CodeSnippet {
+  id: string
+  project_id: string
+  file_path: string | null
+  code: string
+  language: string | null
+  created_at: string
+  updated_at: string
 }
 
 // =============================================
@@ -93,141 +40,126 @@ async function safeApiCall<T>(
 // =============================================
 
 export async function createProject(
-  supabase: SupabaseClient<any, "public", any>,
-  title: string, 
-  templateId?: string,
+  userId: string,
+  name: string,
   description?: string,
-  teamId?: string
+  language?: string,
+  framework?: string
 ): Promise<Project | null> {
   clearSettingsCache()
-  return safeApiCall(supabase, async () => {
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) throw new Error('User not authenticated')
-
-    const { data, error } = await supabase
-      .from('projects')
-      .insert({
-        user_id: user.id,
-        team_id: teamId,
-        title,
-        description,
-        template_id: templateId,
-        status: 'active',
-        is_public: false,
-        metadata: {}
-      })
-      .select()
-      .single()
-
-    if (error) throw error
-    return data
-  }, null, 'createProject')
+  try {
+    const result = await sql`
+      INSERT INTO projects (user_id, name, description, language, framework)
+      VALUES (${userId}, ${name}, ${description || null}, ${language || null}, ${framework || null})
+      RETURNING *
+    `
+    invalidateCache(new RegExp(`^projects:${userId}:`))
+    return result[0] as Project
+  } catch (error) {
+    console.error('createProject failed:', error)
+    return null
+  }
 }
 
-export async function getProjects(
-  supabase: SupabaseClient<any, "public", any> | null = browserSupabase,
-  includeArchived: boolean = false,
-  teamId?: string
-): Promise<Project[]> {
-  const { data: { user } } = await supabase!.auth.getUser()
-  if (!user) return []
-
-  const cacheKey = `projects:${user.id}:${includeArchived}:${teamId || ''}`
+export async function getProjects(userId: string): Promise<Project[]> {
+  const cacheKey = `projects:${userId}`
   const cachedProjects = getFromCache<Project[]>(cacheKey)
   if (cachedProjects) {
     return cachedProjects
   }
 
-  return safeApiCall(supabase!, async () => {
-    let query = supabase!
-      .from('projects')
-      .select('*')
-      .eq('user_id', user.id)
-      .is('deleted_at', null)
-      .order('updated_at', { ascending: false })
-
-    if (!includeArchived) {
-      query = query.eq('status', 'active')
-    }
-
-    if (teamId) {
-      query = query.eq('team_id', teamId)
-    }
-
-    const { data, error } = await query
-    if (error) throw error
-    
-    setInCache(cacheKey, data || [])
-    return data || []
-  }, [], 'getProjects')
+  try {
+    const result = await sql`
+      SELECT * FROM projects
+      WHERE user_id = ${userId}
+      ORDER BY updated_at DESC
+    `
+    const projects = result as Project[]
+    setInCache(cacheKey, projects)
+    return projects
+  } catch (error) {
+    console.error('getProjects failed:', error)
+    return []
+  }
 }
 
-export async function getProject(
-  supabase: SupabaseClient<any, "public", any> | null = browserSupabase,
-  projectId: string
-): Promise<Project | null> {
-  return safeApiCall(supabase!, async () => {
-    const { data, error } = await supabase!
-      .from('projects')
-      .select('*')
-      .eq('id', projectId)
-      .single()
-
-    if (error) throw error
-    return data
-  }, null, 'getProject')
+export async function getProject(projectId: string, userId: string): Promise<Project | null> {
+  try {
+    const result = await sql`
+      SELECT * FROM projects
+      WHERE id = ${projectId} AND user_id = ${userId}
+    `
+    return result.length > 0 ? (result[0] as Project) : null
+  } catch (error) {
+    console.error('getProject failed:', error)
+    return null
+  }
 }
 
 export async function updateProject(
-  supabase: SupabaseClient<any, "public", any> | null = browserSupabase,
-  id: string, 
-  updates: Partial<Project>
-): Promise<boolean> {
-  const { data: { user } } = await supabase!.auth.getUser()
-  if (user) {
-    invalidateCache(new RegExp(`^projects:${user.id}:`))
+  projectId: string,
+  userId: string,
+  updates: Partial<Pick<Project, 'name' | 'description' | 'language' | 'framework'>>
+): Promise<Project | null> {
+  invalidateCache(new RegExp(`^projects:${userId}:`))
+  
+  try {
+    const setClauses: string[] = []
+    const values: any[] = []
+
+    if (updates.name !== undefined) {
+      setClauses.push(`name = $${values.length + 1}`)
+      values.push(updates.name)
+    }
+    if (updates.description !== undefined) {
+      setClauses.push(`description = $${values.length + 1}`)
+      values.push(updates.description)
+    }
+    if (updates.language !== undefined) {
+      setClauses.push(`language = $${values.length + 1}`)
+      values.push(updates.language)
+    }
+    if (updates.framework !== undefined) {
+      setClauses.push(`framework = $${values.length + 1}`)
+      values.push(updates.framework)
+    }
+
+    if (setClauses.length === 0) {
+      return getProject(projectId, userId)
+    }
+
+    setClauses.push('updated_at = NOW()')
+    values.push(projectId, userId)
+
+    const query = `
+      UPDATE projects
+      SET ${setClauses.join(', ')}
+      WHERE id = $${values.length - 1} AND user_id = $${values.length}
+      RETURNING *
+    `
+
+    const result = await sql(query, values)
+    return result.length > 0 ? (result[0] as Project) : null
+  } catch (error) {
+    console.error('updateProject failed:', error)
+    return null
   }
-
-  return safeApiCall(supabase!, async () => {
-    const { error } = await supabase!
-      .from('projects')
-      .update({ ...updates, updated_at: new Date().toISOString() })
-      .eq('id', id)
-
-    if (error) throw error
-    return true
-  }, false, 'updateProject')
 }
 
-export async function deleteProject(
-  supabase: SupabaseClient<any, "public", any> | null = browserSupabase,
-  id: string, 
-  permanent: boolean = false
-): Promise<boolean> {
-  const { data: { user } } = await supabase!.auth.getUser()
-  if (user) {
-    invalidateCache(new RegExp(`^projects:${user.id}:`))
+export async function deleteProject(projectId: string, userId: string): Promise<boolean> {
+  invalidateCache(new RegExp(`^projects:${userId}:`))
+  
+  try {
+    const result = await sql`
+      DELETE FROM projects
+      WHERE id = ${projectId} AND user_id = ${userId}
+      RETURNING id
+    `
+    return result.length > 0
+  } catch (error) {
+    console.error('deleteProject failed:', error)
+    return false
   }
-
-  return safeApiCall(supabase!, async () => {
-    if (permanent) {
-      const { error } = await supabase!
-        .from('projects')
-        .delete()
-        .eq('id', id)
-      if (error) throw error
-    } else {
-      const { error } = await supabase!
-        .from('projects')
-        .update({ 
-          deleted_at: new Date().toISOString(),
-          status: 'deleted'
-        })
-        .eq('id', id)
-      if (error) throw error
-    }
-    return true
-  }, false, 'deleteProject')
 }
 
 // =============================================
@@ -235,76 +167,151 @@ export async function deleteProject(
 // =============================================
 
 export async function saveMessage(
-  supabase: SupabaseClient<any, 'public', any> | null = browserSupabase,
   projectId: string,
   message: Message,
-  sequenceNumber: number,
 ): Promise<boolean> {
-  return safeApiCall(
-    supabase!,
-    async () => {
-      const { error } = await supabase!.rpc('save_message_and_update_project', {
-        project_id_param: projectId,
-        role_param: message.role,
-        content_param: message.content,
-        object_data_param: message.object,
-        result_data_param: message.result,
-        sequence_number_param: sequenceNumber,
-      })
+  try {
+    // Update project's updated_at timestamp
+    await sql`
+      UPDATE projects
+      SET updated_at = NOW()
+      WHERE id = ${projectId}
+    `
 
-      if (error) throw error
-      return true
-    },
-    false,
-    'saveMessage',
-  )
+    // Save the message
+    await sql`
+      INSERT INTO messages (project_id, role, content, model)
+      VALUES (
+        ${projectId}, 
+        ${message.role}, 
+        ${JSON.stringify(message.content)},
+        ${message.model || null}
+      )
+    `
+
+    invalidateCache(`project-messages:${projectId}`)
+    return true
+  } catch (error) {
+    console.error('saveMessage failed:', error)
+    return false
+  }
 }
 
-export async function getProjectMessages(
-  supabase: SupabaseClient<any, "public", any> | null = browserSupabase,
-  projectId: string
-): Promise<Message[]> {
+export async function getProjectMessages(projectId: string): Promise<Message[]> {
   const cacheKey = `project-messages:${projectId}`
   const cachedMessages = getFromCache<Message[]>(cacheKey)
   if (cachedMessages) {
     return cachedMessages
   }
 
-  return safeApiCall(supabase!, async () => {
-    const { data, error } = await supabase!
-      .from('messages')
-      .select('*')
-      .eq('project_id', projectId)
-      .order('sequence_number', { ascending: true })
+  try {
+    const result = await sql`
+      SELECT * FROM messages
+      WHERE project_id = ${projectId}
+      ORDER BY created_at ASC
+    `
 
-    if (error) throw error
-
-    const messages = data?.map((msg: DbMessage) => ({
+    const messages = result.map((msg: any) => ({
       role: msg.role,
-      content: msg.content,
-      object: msg.object_data,
-      result: msg.result_data,
-    })) || []
+      content: typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content,
+      model: msg.model,
+    })) as Message[]
 
     setInCache(cacheKey, messages)
     return messages
-  }, [], 'getProjectMessages')
+  } catch (error) {
+    console.error('getProjectMessages failed:', error)
+    return []
+  }
 }
 
-export async function clearProjectMessages(
-  supabase: SupabaseClient<any, "public", any> | null = browserSupabase,
-  projectId: string
-): Promise<boolean> {
+export async function clearProjectMessages(projectId: string): Promise<boolean> {
   invalidateCache(`project-messages:${projectId}`)
-  return safeApiCall(supabase!, async () => {
-    const { error } = await supabase!
-      .from('messages')
-      .delete()
-      .eq('project_id', projectId)
-
-    if (error) throw error
+  
+  try {
+    await sql`
+      DELETE FROM messages
+      WHERE project_id = ${projectId}
+    `
     return true
-  }, false, 'clearProjectMessages')
+  } catch (error) {
+    console.error('clearProjectMessages failed:', error)
+    return false
+  }
+}
+
+// =============================================
+// CODE SNIPPET OPERATIONS
+// =============================================
+
+export async function createCodeSnippet(
+  projectId: string,
+  code: string,
+  filePath?: string,
+  language?: string
+): Promise<CodeSnippet | null> {
+  try {
+    const result = await sql`
+      INSERT INTO code_snippets (project_id, file_path, code, language)
+      VALUES (${projectId}, ${filePath || null}, ${code}, ${language || null})
+      RETURNING *
+    `
+    return result[0] as CodeSnippet
+  } catch (error) {
+    console.error('createCodeSnippet failed:', error)
+    return null
+  }
+}
+
+export async function getCodeSnippets(projectId: string): Promise<CodeSnippet[]> {
+  try {
+    const result = await sql`
+      SELECT * FROM code_snippets
+      WHERE project_id = ${projectId}
+      ORDER BY created_at DESC
+    `
+    return result as CodeSnippet[]
+  } catch (error) {
+    console.error('getCodeSnippets failed:', error)
+    return []
+  }
+}
+
+export async function updateCodeSnippet(
+  snippetId: string,
+  code: string,
+  filePath?: string,
+  language?: string
+): Promise<CodeSnippet | null> {
+  try {
+    const result = await sql`
+      UPDATE code_snippets
+      SET code = ${code},
+          file_path = ${filePath || null},
+          language = ${language || null},
+          updated_at = NOW()
+      WHERE id = ${snippetId}
+      RETURNING *
+    `
+    return result.length > 0 ? (result[0] as CodeSnippet) : null
+  } catch (error) {
+    console.error('updateCodeSnippet failed:', error)
+    return null
+  }
+}
+
+export async function deleteCodeSnippet(snippetId: string): Promise<boolean> {
+  try {
+    const result = await sql`
+      DELETE FROM code_snippets
+      WHERE id = ${snippetId}
+      RETURNING id
+    `
+    return result.length > 0
+  } catch (error) {
+    console.error('deleteCodeSnippet failed:', error)
+    return false
+  }
 }
 
 // =============================================
@@ -326,8 +333,4 @@ export async function generateProjectTitle(firstMessage: string): Promise<string
   return title
 }
 
-// Reset the tables check (useful for when migration is completed)
-export function resetTableCheck(): void {
-  tablesChecked = false
-  tablesExist = false
-}
+export { sql }
